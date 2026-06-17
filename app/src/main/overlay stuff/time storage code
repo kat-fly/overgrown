@@ -1,0 +1,53 @@
+package com.example.overgrown.tracker
+
+object AppUsageStore {
+
+    private val usageSeconds =
+        mutableMapOf<String, Long>()
+
+    private val appLimitsSeconds =
+        mutableMapOf<String, Long>()
+
+    fun addSecond(packageName: String) {
+        if (packageName == "Unknown") return
+        if (packageName == "com.example.overgrown") return
+        if (packageName.contains("launcher")) return
+
+        val current =
+            usageSeconds[packageName] ?: 0L
+
+        usageSeconds[packageName] =
+            current + 1L
+    }
+
+    fun getUsage(): Map<String, Long> {
+        return usageSeconds.toMap()
+    }
+
+    fun setLimit(
+        packageName: String,
+        seconds: Long
+    ) {
+        appLimitsSeconds[packageName] = seconds
+    }
+
+    fun getLimit(
+        packageName: String
+    ): Long {
+
+        return AppLimitStore
+            .getLimit(packageName)
+    }
+
+    fun shouldShowOverlay(
+        packageName: String
+    ): Boolean {
+        val usage =
+            usageSeconds[packageName] ?: 0L
+
+        val limit =
+            getLimit(packageName)
+
+        return usage >= limit
+    }
+}
