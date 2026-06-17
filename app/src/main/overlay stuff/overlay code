@@ -1,0 +1,599 @@
+package com.example.overgrown.overlay
+
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.app.Service
+import android.content.Intent
+import android.graphics.PixelFormat
+import android.os.IBinder
+import android.view.Gravity
+import android.view.WindowManager
+import android.widget.FrameLayout
+import com.airbnb.lottie.LottieAnimationView
+import com.airbnb.lottie.LottieDrawable
+import com.example.overgrown.tracker.UsageTracker
+import kotlinx.coroutines.*
+import com.example.overgrown.tracker.AppUsageStore
+
+class OverlayService : Service() {
+
+    private var windowManager: WindowManager? = null
+    private var overlayContainer: FrameLayout? = null
+
+    private var serviceJob: Job? = null
+    private var growthJob: Job? = null
+
+    private lateinit var usageTracker: UsageTracker
+
+    private data class PlacedFlower(
+        val x: Int,
+        val y: Int,
+        val size: Int
+    )
+
+    private val lastBranchFlowers =
+        mutableMapOf<String, PlacedFlower>()
+
+    private val flowers = listOf(
+        "clover_og.json",
+        "peony_og.json",
+        "sunny_og.json",
+        "jupiter_og.json",
+        "rocky_og.json"
+    )
+
+    private var flowerCount = 0
+    private val maxFlowers = 120
+
+    override fun onCreate() {
+        super.onCreate()
+
+        windowManager =
+            getSystemService(WINDOW_SERVICE) as WindowManager
+
+        usageTracker =
+            UsageTracker(this)
+
+        serviceJob =
+            CoroutineScope(Dispatchers.Main).launch {
+                while (true) {
+                    val currentApp =
+                        usageTracker.getCurrentApp()
+
+                    if (
+                        currentApp == "Unknown" ||
+                        currentApp == packageName ||
+                        currentApp.contains("launcher")
+                    ) {
+                        hideOverlay()
+                    } else {
+                        AppUsageStore.addSecond(currentApp)
+
+                        if (
+                            AppUsageStore.shouldShowOverlay(currentApp)
+                        ) {
+                            showOverlay()
+                        } else {
+                            hideOverlay()
+                        }
+                    }
+
+                    delay(1000)
+                }
+            }
+    }
+
+    private fun showOverlay() {
+        if (overlayContainer != null) return
+
+        flowerCount = 0
+        lastBranchFlowers.clear()
+
+        overlayContainer =
+            FrameLayout(this)
+
+        val params =
+            WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                PixelFormat.TRANSLUCENT
+            )
+
+        params.gravity =
+            Gravity.TOP or Gravity.START
+
+        windowManager?.addView(
+            overlayContainer,
+            params
+        )
+
+        startFlowerLoop()
+    }
+
+    private fun startFlowerLoop() {
+        growthJob?.cancel()
+
+        growthJob =
+            CoroutineScope(Dispatchers.Main).launch {
+                delay(250)
+                addNextFlower()
+            }
+    }
+
+    private fun addNextFlower() {
+        val container =
+            overlayContainer ?: return
+
+        if (flowerCount >= maxFlowers) return
+
+        val flowerIndex =
+            flowerCount % flowers.size
+
+        val flowerFile =
+            flowers[flowerIndex]
+
+        val flowerSize =
+            (300..520).random()
+
+        val screenWidth =
+            resources.displayMetrics.widthPixels
+
+        val screenHeight =
+            resources.displayMetrics.heightPixels
+
+        val position =
+            getFlowerPosition(
+                count = flowerCount,
+                flowerSize = flowerSize,
+                screenWidth = screenWidth,
+                screenHeight = screenHeight
+            )
+
+        val flowerView =
+            LottieAnimationView(this).apply {
+                setAnimation(flowerFile)
+                repeatCount = 0
+                repeatMode = LottieDrawable.RESTART
+                speed = 1.7f
+                alpha = 0.95f
+                progress = 0f
+            }
+
+        val layoutParams =
+            FrameLayout.LayoutParams(
+                flowerSize,
+                flowerSize
+            )
+
+        flowerView.x =
+            position.first.toFloat()
+
+        flowerView.y =
+            position.second.toFloat()
+
+        container.addView(
+            flowerView,
+            layoutParams
+        )
+
+        flowerCount++
+
+        flowerView.addAnimatorListener(
+            object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(
+                    animation: Animator
+                ) {
+                    super.onAnimationEnd(animation)
+
+                    flowerView.removeAllAnimatorListeners()
+
+                    flowerView.progress =
+                        getFreezeProgress(flowerFile)
+
+                    flowerView.pauseAnimation()
+
+                    growthJob =
+                        CoroutineScope(Dispatchers.Main).launch {
+                            delay(
+                                getDelayAfterFlower(flowerIndex)
+                            )
+
+                            if (overlayContainer != null) {
+                                addNextFlower()
+                            }
+                        }
+                }
+            }
+        )
+
+        flowerView.playAnimation()
+    }
+
+    private fun getFlowerPosition(
+        count: Int,
+        flowerSize: Int,
+        screenWidth: Int,
+        screenHeight: Int
+    ): Pair<Int, Int> {
+
+        /*
+            Corner numbers:
+
+            0 = top-left
+            1 = top-right
+            2 = bottom-left
+            3 = bottom-right
+
+            Branch numbers:
+
+            0 = horizontal branch
+            1 = vertical branch
+
+            This version forces flowers from the same
+            corner branch to overlap by at least 1 pixel,
+            but no more than half of the smaller flower.
+        */
+
+        if (count < 4) {
+            val corner =
+                count
+
+            val start =
+                getCornerStartPosition(
+                    corner = corner,
+                    layer = 0,
+                    flowerSize = flowerSize,
+                    screenWidth = screenWidth,
+                    screenHeight = screenHeight
+                )
+
+            val finalX =
+                start.first.coerceIn(
+                    -flowerSize / 2,
+                    screenWidth - flowerSize / 2
+                )
+
+            val finalY =
+                start.second.coerceIn(
+                    -flowerSize / 2,
+                    screenHeight - flowerSize / 2
+                )
+
+            val placedFlower =
+                PlacedFlower(
+                    x = finalX,
+                    y = finalY,
+                    size = flowerSize
+                )
+
+            lastBranchFlowers[
+                getBranchKey(
+                    corner = corner,
+                    branch = 0,
+                    layer = 0
+                )
+            ] = placedFlower
+
+            lastBranchFlowers[
+                getBranchKey(
+                    corner = corner,
+                    branch = 1,
+                    layer = 0
+                )
+            ] = placedFlower
+
+            return Pair(
+                finalX,
+                finalY
+            )
+        }
+
+        val adjustedCount =
+            count - 4
+
+        val positionsPerLayer =
+            40
+
+        val layer =
+            adjustedCount / positionsPerLayer
+
+        val positionInLayer =
+            adjustedCount % positionsPerLayer
+
+        val direction =
+            positionInLayer % 8
+
+        val corner =
+            when (direction) {
+                0, 1 -> 0
+                2, 3 -> 1
+                4, 5 -> 2
+                else -> 3
+            }
+
+        val branch =
+            when (direction) {
+                0, 2, 4, 6 -> 0
+                else -> 1
+            }
+
+        val branchKey =
+            getBranchKey(
+                corner = corner,
+                branch = branch,
+                layer = layer
+            )
+
+        val previousFlower =
+            lastBranchFlowers[branchKey]
+
+        val rawPosition =
+            if (previousFlower == null) {
+                getCornerStartPosition(
+                    corner = corner,
+                    layer = layer,
+                    flowerSize = flowerSize,
+                    screenWidth = screenWidth,
+                    screenHeight = screenHeight
+                )
+            } else {
+                getOverlappingPosition(
+                    corner = corner,
+                    branch = branch,
+                    previousFlower = previousFlower,
+                    flowerSize = flowerSize
+                )
+            }
+
+        val finalX =
+            rawPosition.first.coerceIn(
+                -flowerSize / 2,
+                screenWidth - flowerSize / 2
+            )
+
+        val finalY =
+            rawPosition.second.coerceIn(
+                -flowerSize / 2,
+                screenHeight - flowerSize / 2
+            )
+
+        lastBranchFlowers[branchKey] =
+            PlacedFlower(
+                x = finalX,
+                y = finalY,
+                size = flowerSize
+            )
+
+        return Pair(
+            finalX,
+            finalY
+        )
+    }
+
+    private fun getCornerStartPosition(
+        corner: Int,
+        layer: Int,
+        flowerSize: Int,
+        screenWidth: Int,
+        screenHeight: Int
+    ): Pair<Int, Int> {
+
+        val bottomSafeInset =
+            100
+
+        val inward =
+            layer * 120
+
+        val randomX =
+            (-35..35).random()
+
+        val randomY =
+            (-35..35).random()
+
+        val x =
+            when (corner) {
+
+                // top-left
+                0 -> -flowerSize / 3 +
+                        inward +
+                        randomX
+
+                // top-right
+                1 -> screenWidth -
+                        flowerSize +
+                        flowerSize / 3 -
+                        inward +
+                        randomX
+
+                // bottom-left
+                2 -> -flowerSize / 3 +
+                        inward +
+                        randomX
+
+                // bottom-right
+                else -> screenWidth -
+                        flowerSize +
+                        flowerSize / 3 -
+                        inward +
+                        randomX
+            }
+        val y =
+            when (corner) {
+                // top-left
+                0 -> -flowerSize / 3 +
+                        inward +
+                        randomY
+
+                // top-right
+                1 -> -flowerSize / 3 +
+                        inward +
+                        randomY
+
+                // bottom-left, slightly above bottom
+                2 -> screenHeight -
+                        flowerSize -
+                        bottomSafeInset -
+                        inward +
+                        randomY
+
+                // bottom-right, slightly above bottom
+                else -> screenHeight -
+                        flowerSize -
+                        bottomSafeInset -
+                        inward +
+                        randomY
+            }
+
+        return Pair(
+            x,
+            y
+        )
+    }
+
+    private fun getOverlappingPosition(
+        corner: Int,
+        branch: Int,
+        previousFlower: PlacedFlower,
+        flowerSize: Int
+    ): Pair<Int, Int> {
+
+        val smallerFlowerSize =
+            minOf(
+                previousFlower.size,
+                flowerSize
+            )
+
+        val maxAllowedOverlap =
+            (smallerFlowerSize / 2)
+                .coerceAtLeast(1)
+
+        val overlapAmount =
+            (smallerFlowerSize / 3)
+                .coerceIn(
+                    1,
+                    maxAllowedOverlap
+                )
+
+        val horizontalJitter =
+            (-25..25).random()
+
+        val verticalJitter =
+            (-25..25).random()
+
+        val x: Int
+        val y: Int
+
+        if (branch == 0) {
+            /*
+                Horizontal branches:
+
+                top-left and bottom-left move right.
+                top-right and bottom-right move left.
+            */
+
+            x =
+                when (corner) {
+                    0, 2 -> previousFlower.x +
+                            previousFlower.size -
+                            overlapAmount
+
+                    else -> previousFlower.x -
+                            flowerSize +
+                            overlapAmount
+                }
+
+            y =
+                previousFlower.y +
+                        verticalJitter
+
+        } else {
+            /*
+                Vertical branches:
+
+                top-left and top-right move down.
+                bottom-left and bottom-right move up.
+            */
+
+            x =
+                previousFlower.x +
+                        horizontalJitter
+
+            y =
+                when (corner) {
+                    0, 1 -> previousFlower.y +
+                            previousFlower.size -
+                            overlapAmount
+
+                    else -> previousFlower.y -
+                            flowerSize +
+                            overlapAmount
+                }
+        }
+
+        return Pair(
+            x,
+            y
+        )
+    }
+
+    private fun getBranchKey(
+        corner: Int,
+        branch: Int,
+        layer: Int
+    ): String {
+        return "$corner-$branch-$layer"
+    }
+
+    private fun getFreezeProgress(
+        fileName: String
+    ): Float {
+        return when (fileName) {
+            "jupiter_og.json" -> 0.75f
+            "rocky_og.json" -> 0.85f
+            else -> 0.9f
+        }
+    }
+
+    private fun getDelayAfterFlower(
+        flowerIndex: Int
+    ): Long {
+        return when (flowerIndex) {
+            3 -> 250L
+            4 -> 250L
+            else -> 700L
+        }
+    }
+
+    private fun hideOverlay() {
+        growthJob?.cancel()
+        growthJob = null
+
+        if (overlayContainer == null) return
+
+        windowManager?.removeView(
+            overlayContainer
+        )
+
+        overlayContainer = null
+        flowerCount = 0
+        lastBranchFlowers.clear()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+
+        serviceJob?.cancel()
+        growthJob?.cancel()
+
+        hideOverlay()
+    }
+
+    override fun onBind(
+        intent: Intent?
+    ): IBinder? {
+        return null
+    }
+}
