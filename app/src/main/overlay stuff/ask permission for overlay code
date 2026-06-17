@@ -1,0 +1,27 @@
+package com.example.overgrown.tracker
+
+import android.app.AppOpsManager
+import android.content.Context
+
+object PermissionHelper {
+
+    fun hasUsageAccess(
+        context: Context
+    ): Boolean {
+
+        val appOps =
+            context.getSystemService(
+                Context.APP_OPS_SERVICE
+            ) as AppOpsManager
+
+        val mode =
+            appOps.checkOpNoThrow(
+                "android:get_usage_stats",
+                android.os.Process.myUid(),
+                context.packageName
+            )
+
+        return mode ==
+                AppOpsManager.MODE_ALLOWED
+    }
+}
